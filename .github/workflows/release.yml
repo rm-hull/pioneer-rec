@@ -1,0 +1,122 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin_arm64
+            runner: macos-latest
+          - platform: darwin_amd64
+            runner: macos-13
+          - platform: linux_amd64
+            runner: ubuntu-latest
+          - platform: linux_arm64
+            runner: ubuntu-latest
+            cross: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools (Ubuntu)
+        if: matrix.runner == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y gcc make
+
+      - name: Set up QEMU (Linux arm64 cross-compilation)
+        if: matrix.cross == true
+        run: |
+          sudo apt-get update && sudo apt-get install -y qemu-user-static
+
+      - name: Build all variants
+        if: matrix.cross != true
+        run: make all
+
+      - name: Build all variants (Linux arm64 cross-compile)
+        if: matrix.cross == true
+        run: |
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          make all CC=aarch64-linux-gnu-gcc
+
+      - name: Package binaries
+        run: |
+          VERSION="${{ github.ref_name }}"
+          PLATFORM="${{ matrix.platform }}"
+          ARCHIVE="pioneer-rec-${VERSION}-${PLATFORM}.tar.gz"
+          tar -czf "${ARCHIVE}" pioneer_rec pioneer_rec_520 pioneer_rec_545 pioneer_rec_550
+          echo "archive=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.archive }}
+          draft: false
+
+  generate-cask:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release artifacts
+        run: |
+          VERSION="${{ github.ref_name }}"
+          mkdir -p artifacts
+          cd artifacts
+          gh release download "$VERSION" --repo rm-hull/pioneer-rec
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute SHA256 checksums
+        run: |
+          cd artifacts
+          for f in *.tar.gz; do
+            sha256sum "$f" | awk '{print $1 " " $2}'
+          done > checksums.txt
+          cat checksums.txt
+
+      - name: Generate Homebrew cask
+        run: |
+          VERSION="${{ github.ref_name }}"
+          # Remove leading 'v' from version tag
+          CLEAN_VERSION="${VERSION#v}"
+
+          # Extract checksums
+          DARWIN_ARM64_SHA=$(grep "darwin_arm64" artifacts/checksums.txt | awk '{print $1}')
+          DARWIN_AMD64_SHA=$(grep "darwin_amd64" artifacts/checksums.txt | awk '{print $1}')
+          LINUX_ARM64_SHA=$(grep "linux_arm64" artifacts/checksums.txt | awk '{print $1}')
+          LINUX_AMD64_SHA=$(grep "linux_amd64" artifacts/checksums.txt | awk '{print $1}')
+
+          # Copy the template and fill in placeholders
+          cp .github/pioneer-rec.rb pioneer-rec.rb
+          sed -i "s/VERSION_PLACEHOLDER/${CLEAN_VERSION}/" pioneer-rec.rb
+          sed -i "s/DARWIN_ARM64_SHA_PLACEHOLDER/${DARWIN_ARM64_SHA}/" pioneer-rec.rb
+          sed -i "s/DARWIN_AMD64_SHA_PLACEHOLDER/${DARWIN_AMD64_SHA}/" pioneer-rec.rb
+          sed -i "s/LINUX_ARM64_SHA_PLACEHOLDER/${LINUX_ARM64_SHA}/" pioneer-rec.rb
+          sed -i "s/LINUX_AMD64_SHA_PLACEHOLDER/${LINUX_AMD64_SHA}/" pioneer-rec.rb
+
+          cat pioneer-rec.rb
+          echo "### Generated Homebrew Cask" >> "$GITHUB_STEP_SUMMARY"
+          echo '```ruby' >> "$GITHUB_STEP_SUMMARY"
+          cat pioneer-rec.rb >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push cask to Homebrew tap
+        run: |
+          git clone "https://x-access-token:${HOMEBREW_TAP_GITHUB_TOKEN}@github.com/rm-hull/homebrew-tap.git" homebrew-tap
+          mkdir -p homebrew-tap/Casks
+          cp pioneer-rec.rb homebrew-tap/Casks/pioneer-rec.rb
+          cd homebrew-tap
+          git config user.name "GitHub Actions"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/pioneer-rec.rb
+          git commit -m "chore: update pioneer-rec to ${GITHUB_REF_NAME#v}"
+          git push "https://x-access-token:${HOMEBREW_TAP_GITHUB_TOKEN}@github.com/rm-hull/homebrew-tap.git" master
+        env:
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}

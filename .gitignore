@@ -11,3 +11,5 @@ pioneer_rec_*
 
 # Object files
 *.o
+
+.env
