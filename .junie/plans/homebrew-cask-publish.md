@@ -102,11 +102,14 @@ Add a post-release job to the `release.yml` workflow.
 - Commit and push the cask to `rm-hull/homebrew-tap` using the `HOMEBREW_TAP_GITHUB_TOKEN` secret.
 - Include `postflight` block to remove `com.apple.quarantine` on macOS.
 
-### * Step 3: Create initial release and verify installation
+### ✓ Step 3: Create initial release and verify installation
 Create the initial release so users can install via Homebrew.
 - Cut a `v0.1.0` tag (already created).
 - Push the tag to trigger the release workflow.
 - Fix `macos-13` → `macos-15-intel` runner (deprecated, causing queue hang).
+- Fix cask URL format: underscore → dash between version and platform (`v0.1.0-darwin_arm64`).
+- Fix deprecated `postflight` → `postflight_steps` with `run` and `{{staged_path}}` template tokens.
+- Tag `v0.1.1` with fixes, release workflow completed successfully.
 - Verify that the GitHub Release is created with all artifacts.
-- Verify that `pioneer-rec.rb` is pushed to `rm-hull/homebrew-tap`.
+- Verify that `pioneer-rec.rb` is pushed to `rm-hull/homebrew-tap` with correct content.
 - Test: `brew install rm-hull/tap/pioneer-rec`

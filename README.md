@@ -6,8 +6,18 @@
 Recover recordings from failed Pioneer DVR and Sony HXD recorder hard drives.
 
 > So there you are with your Pioneer DVR633H-S, DVR545H, DVR-550H, DVR-520H, or Sony HXD showing you an HDD Error and refusing to boot. This usually indicates that the hard drive in the recorder went bad. But don't panic — there may be hope!
-> 
+>
 > Unlike other utilities for this task, this program can reconstruct movies from the hard drive by parsing the filesystem structure of the Pioneer DVR instead of just dumping MPEG chunks.
+
+## Installing
+
+The quickest way is via [Homebrew](https://brew.sh/):
+
+```sh
+brew install rm-hull/tap/pioneer-rec
+```
+
+This installs all four variants: `pioneer_rec`, `pioneer_rec_520`, `pioneer_rec_545`, and `pioneer_rec_550`.
 
 ## Building
 
