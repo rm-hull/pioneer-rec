@@ -2,12 +2,14 @@
  * Definitions for DVR-550H recorder for pioneer_rec *
  *****************************************************/
 
+#include "portable.h"
+
 #define RECORDER		"DVR-550H"
 //#define FNTENTRY_MAGIC	0x0CCC2400	// Entries in FNTENTRY list seem to have this magic
 
-#define FNT_OFFSET	BLOCK_SIZE+32+(2*sizeof(ADDRESS))	// Pointer to FNT directory should be at this offset (sector 5)
-#define FAT_OFFSET	6*SECT_SIZE+128						// File allocation table offset relative to start
-#define FOT_OFFSET	FAT_OFFSET+5*BLOCK_SIZE				// File order table offset relative to start
+#define FNT_OFFSET	((uint32_t)(BLOCK_SIZE+32+(2*sizeof(ADDRESS))))	// Pointer to FNT directory should be at this offset (sector 5)
+#define FAT_OFFSET	((uint32_t)(6*SECT_SIZE+128))							// File allocation table offset relative to start
+#define FOT_OFFSET	((uint32_t)(FAT_OFFSET+5*BLOCK_SIZE))				// File order table offset relative to start
 /* If FOT cannot be found at this offset, you should try searching for a 
  * 0xFF bitmap follwing the fatdir-pointers and at the end of that list, there
  * is an ADDRESS pointing at the FOT
@@ -18,7 +20,7 @@
 #pragma pack(1)
 /* A [F]ile [N]ame [T]able entry */
 typedef struct {
-	long unk1;
+	int32_t unk1;
 	DWORD unk2;
 	WORD sort;      
 	WORD fotoffset;  // Offset in FOTENTRY table
