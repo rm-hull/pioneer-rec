@@ -1,4 +1,4 @@
-# pioneer-rec
+# pioneer-rec (linux edition) ![tux](./docs/tux-80px.png)
 
 > [!NOTE]
 > This Windows-to-POSIX port was performed entirely with [Junie CLI](https://jetbrains.com/junie).
@@ -117,10 +117,10 @@ This produces `out.vob` using ffmpeg.
 
 ## Original Windows Build
 
-The original `.dsp` / `.dsw` Visual Studio 6 project files are preserved for reference. This project now targets macOS and Linux via the `Makefile`.
+The original `.dsp` / `.dsw` Visual Studio 6 project files are preserved in the `archive` folder for reference. This project now targets macOS and Linux via the `Makefile`.
 
 ## Links
 
 - Discussion: [Blog post](http://hardwarefetish.com/584-pioneer-dvr-recorder-harddisk-recovery)
-- Original README: [README.txt](README.txt)
+- Original README: [README.txt](archive/README.txt)
 - Panasonic DVR recorders: [panasonic-rec](https://github.com/leecher1337/panasonic-rec)
