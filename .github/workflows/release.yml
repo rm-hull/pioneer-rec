@@ -120,6 +120,6 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Casks/pioneer-rec.rb
           git commit -m "chore: update pioneer-rec to ${GITHUB_REF_NAME#v}"
-          git push "https://x-access-token:${HOMEBREW_TAP_GITHUB_TOKEN}@github.com/rm-hull/homebrew-tap.git" master
+          git push "https://x-access-token:${HOMEBREW_TAP_GITHUB_TOKEN}@github.com/rm-hull/homebrew-tap.git" main
         env:
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
