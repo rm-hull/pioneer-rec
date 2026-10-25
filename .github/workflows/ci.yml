@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y gcc make
+
+      - name: Build all variants
+        run: make all
+
+      - name: Smoke test — help flag
+        run: ./pioneer_rec -h
+
+      - name: Smoke test — synthetic extract
+        run: |
+          # Create a 2048-byte file with VOB magic (00 00 01 BA) at offset 0
+          printf '\x00\x00\x01\xBA\x00\x00\x00\x01' > test.img
+          dd if=/dev/zero bs=2048 count=1 2>/dev/null | \
+            tr '\0' '\xFF' >> test.img
+          mkdir -p test_out
+          ./pioneer_rec -x test.img test_out
+          # Should produce at least one .mpg file
+          ls test_out/*.mpg
+
+      - name: Build with sanitizers
+        run: make check
