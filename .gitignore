@@ -1,0 +1,13 @@
+# Build artifacts
+pioneer_rec
+pioneer_rec_*
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Object files
+*.o
