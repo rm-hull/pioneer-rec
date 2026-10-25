@@ -23,7 +23,7 @@ jobs:
             cross: true
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install build tools (Ubuntu)
         if: matrix.runner == 'ubuntu-latest'
@@ -53,7 +53,7 @@ jobs:
           echo "archive=${ARCHIVE}" >> "$GITHUB_ENV"
 
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: ${{ env.archive }}
           draft: false
@@ -62,7 +62,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download release artifacts
         run: |
