@@ -44,13 +44,13 @@ make check
 Assuming you have a disk image `image.dd` and a recovery destination directory `./dump`:
 
 ```sh
-./pioneer_rec -d image.dd ./dump
+pioneer_rec -d image.dd ./dump
 ```
 
 ## Usage
 
 ```
-./pioneer_rec [-s<x|m> <SCR threshold>] [-o <Offset>] [-c <Start-Cnt>]
+pioneer_rec [-s<x|m> <SCR threshold>] [-o <Offset>] [-c <Start-Cnt>]
 	<-l> <src file> <-D>
 	<-d|-x|-p|-L> <src file> <dest dir>
 	<-m> <dest dir>
@@ -82,14 +82,14 @@ ddrescue -r3 /dev/sdX hdd.img hdd.map
 make pioneer_rec_550
 
 # 3. List recordings (compare to recorder menu)
-./pioneer_rec_550 -l hdd.img
+pioneer_rec_550 -l hdd.img
 
 # 4. Dump recordings (filesystem-aware, recommended)
-./pioneer_rec_550 -d hdd.img ./dump
+pioneer_rec_550 -d hdd.img ./dump
 
 # 5. If directory structures are damaged, use extract+merge fallback
-./pioneer_rec_550 -p hdd.img ./extracted
-./pioneer_rec_550 -m ./extracted
+pioneer_rec_550 -p hdd.img ./extracted
+pioneer_rec_550 -m ./extracted
 
 # 6. Verify output
 ffprobe ./dump/*/*.mpg
@@ -112,7 +112,7 @@ The Sony RDR-HDX995 uses the **DVR-550H** filesystem format. Build with:
 make pioneer_rec_550
 ```
 
-Then use `./pioneer_rec_550` for all operations (`-l`, `-d`, `-x`, `-p`, `-m`).
+Then use `pioneer_rec_550` for all operations (`-l`, `-d`, `-x`, `-p`, `-m`).
 
 ## Multi-stream recordings
 
