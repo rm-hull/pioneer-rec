@@ -53,3 +53,11 @@ typedef struct {
 	BYTE unk5[12];
 } FATENTRY;
 #pragma pack()
+
+/* Compile-time struct size validation */
+_Static_assert(sizeof(ADDRESS) == 8, "ADDRESS must be 8 bytes");
+_Static_assert(sizeof(BLISTENTRY) == 8, "BLISTENTRY must be 8 bytes");
+_Static_assert(sizeof(TIMESTAMP) == 8, "TIMESTAMP must be 8 bytes");
+_Static_assert(sizeof(FNTENTRY) == 128, "FNTENTRY must be 128 bytes");
+_Static_assert(sizeof(FOTENTRY) == 16, "FOTENTRY must be 16 bytes");
+_Static_assert(sizeof(FATENTRY) == 96, "FATENTRY must be 96 bytes");
