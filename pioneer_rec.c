@@ -12,22 +12,44 @@
  * Info:        http://code.google.com/p/pioneer-rec                         *
  *****************************************************************************/
 
-#include <io.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+#include <stdbool.h>
 #include <errno.h>
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#define snprintf _snprintf
+#include <unistd.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <time.h>
+
+/* Fixed-width type aliases (must come before struct definitions) */
+typedef uint32_t DWORD;
+typedef uint16_t WORD;
+typedef uint8_t  BYTE;
+
+/* Byte-swap macros (gcc/clang builtins) */
+#if defined(__GNUC__) || defined(__clang__)
+	#define B2N_32(x) __builtin_bswap32((uint32_t)(x))
+	#define B2N_16(x) __builtin_bswap16((uint16_t)(x))
+#else
+	#define B2N_32(x) (((uint32_t)(x) << 24) | \
+	                   (((uint32_t)(x) << 8) & 0x00FF0000U) | \
+	                   (((uint32_t)(x) >> 8) & 0x0000FF00U) | \
+	                   ((uint32_t)(x) >> 24))
+	#define B2N_16(x) (((uint16_t)(x) << 8) | ((uint16_t)(x) >> 8))
+#endif
+
 
 #define BLOCK_SIZE		2048		// Data is allocated in 2K blocks
 #define SECT_SIZE		512			// A sector always has 512 bytes
 
-#define VOB_MAGIC		0xBA010000	// Start of a MPEG Pack header
-#define SCR_THRESH_X	0x600		// Default threshold SCR stamps on extract
-#define SCR_THRESH_M	5			// Default threshold SCR stamps on merge
-#define MAX_DIRSRCH		0x5000000	// Heuristic: Search up to this offset for diretory
+#define VOB_MAGIC		0xBA010000U	// Start of a MPEG Pack header
+#define SCR_THRESH_X	0x600U		// Default threshold SCR stamps on extract
+#define SCR_THRESH_M	5U			// Default threshold SCR stamps on merge
+#define MAX_DIRSRCH		0x5000000U	// Heuristic: Search up to this offset for diretory
 
 #pragma pack(1)
 
@@ -58,18 +80,18 @@ typedef WORD INODEINDEX;
 
 #pragma pack()
 
+#ifndef DVR
+#define DVR 633
+#endif
+
 #if DVR == 520
 #include "dvr520h.h"
-#else
-#if DVR == 545
+#elif DVR == 545
 #include "dvr545h.h"
-#else
-#if DVR == 550
+#elif DVR == 550
 #include "dvr550h.h"
 #else
 #include "dvr633h.h"
-#endif
-#endif
 #endif
 
 /* Constants */
@@ -82,27 +104,20 @@ typedef WORD INODEINDEX;
 #define FAT_ENTRIES		 (BLOCK_SIZE/sizeof(FATENTRY))
 #define BLIST_ENTRIES    (BLOCK_SIZE/sizeof(BLISTENTRY))
 
+/* Helper: read exactly 'len' bytes at 'offset' from file 'fp' into 'buf' using pread */
+static int rd_at(FILE *fp, off_t offset, void *buf, size_t len)
+{
+	if (fseeko(fp, offset, SEEK_SET) != 0)
+		return 0;
+	size_t n = fread(buf, 1, len, fp);
+	return (n == len) ? 1 : (n > 0 ? 1 : 0);
+}
+
 /* Prototypes */
-static __inline unsigned long B2N_32(unsigned long x) {
-  __asm {
-    mov eax, x
-    bswap eax
-  }
-}
-static __inline unsigned short B2N_16(unsigned short x) {
-  __asm {
-    mov ax, x
-    xchg ah, al
-	cwde
-  }
-}
-typedef int (WINAPI *fpPathCleanupSpec)(PCWSTR pszDir, PWSTR pszSpec);
-static void ShowError (void);
-static int myPathCleanupSpec(PWSTR pszSpec);
+static int myPathCleanupSpec(char *pszSpec);
 static void dumpFNTEntry(char *pszDstDir, int idx, FNTENTRY *fnt, TIMESTAMP *ts);
-static void printFNTEntry(char *pszDstDir, WCHAR *wszDstDir, fpPathCleanupSpec _PathCleanupSpec, 
-						  int idx, FNTENTRY *fnt, TIMESTAMP *ts);
-static BOOL dumpFile(HANDLE fp, HANDLE fpOut, FATENTRY *fat);
+static void printFNTEntry(char *pszDstDir, int idx, FNTENTRY *fnt, TIMESTAMP *ts);
+static bool dumpFile(FILE *fp, FILE *fpOut, FATENTRY *fat);
 
 /****************************************************************************
  *                                P U B L I C                               *
@@ -142,7 +157,7 @@ int usage(char *pszCmd)
 		"\t-p\tProcess (Extract & Merge)\n\n"
 		"If your directory structure and image isn't garbled, you should use -d\n"
 		"In case your image is severely damaged, you can try -p instead.\n\n"
-		"Example: %s -d pioneer.img f:\\dump\n", pszCmd, SCR_THRESH_X, SCR_THRESH_M, 
+		"Example: %s -d pioneer.img /path/to/dump\n", pszCmd, SCR_THRESH_X, SCR_THRESH_M,
 		pszCmd);
 	return EXIT_FAILURE;
 }
@@ -160,73 +175,100 @@ int usage(char *pszCmd)
  * Returns:
  *	TRUE on success, FALSE on failure
  */
-BOOL extract(char *pszSrc, char *pszDstDir, DWORD dwOffset, DWORD fno, DWORD dwThresh)
+bool extract(char *pszSrc, char *pszDstDir, uint64_t dwOffset, DWORD fno, DWORD dwThresh)
 {
-	HANDLE fp, fpout=NULL;
-	LARGE_INTEGER imgsz, offset;
-	DWORD read;
-	unsigned long lastvob=0, vob;
+	FILE *fp = NULL, *fpout = NULL;
+	off_t imgsz = 0, offset = 0;
+	uint32_t lastvob = 0, vob;
 	BYTE buf[BLOCK_SIZE];
-	char outfile[MAX_PATH], *pszAction="Scanning";
+	char outfile[4096], *pszAction = "Scanning";
+	struct stat st;
 
-	if (access(pszDstDir, 2))
+	/* Check destination directory is writable */
 	{
-		fprintf(stderr, "Cannot write to destination dir %s: ", pszDstDir, strerror(errno));
-		return FALSE;
-	}
-	if ((fp=CreateFile(pszSrc, GENERIC_READ, FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL)) == INVALID_HANDLE_VALUE)
-	{
-		fprintf(stderr, "Cannot open source file %s: ", pszSrc);
-		ShowError();
-		return FALSE;
-	}
-	offset.QuadPart = dwOffset;
-	if (dwOffset) SetFilePointer(fp,dwOffset,NULL,FILE_BEGIN);
-	imgsz.LowPart=GetFileSize(fp,&imgsz.HighPart);
-	while(ReadFile(fp,buf,sizeof(buf),&read,NULL) && read)
-	{
-		if (offset.QuadPart%100==0) printf ("\r%s %X%08X/%X%08X (%0d%%)...", pszAction, offset.HighPart, offset.LowPart, 
-			imgsz.HighPart, imgsz.LowPart, (int)(((double)offset.QuadPart/(double)imgsz.QuadPart)*100));
-		if (*((unsigned long*)buf)==VOB_MAGIC)
+		struct stat dstst;
+		if (stat(pszDstDir, &dstst) != 0 || !S_ISDIR(dstst.st_mode))
 		{
-			pszAction="Dumping";
-			vob=B2N_32(*((unsigned long*)&buf[4]));
-			if (vob>lastvob+dwThresh || vob<lastvob || lastvob==0)
+			fprintf(stderr, "Cannot write to destination dir %s: %s\n", pszDstDir, strerror(errno));
+			return false;
+		}
+	}
+
+	fp = fopen(pszSrc, "rb");
+	if (!fp)
+	{
+		fprintf(stderr, "Cannot open source file %s: %s\n", pszSrc, strerror(errno));
+		return false;
+	}
+
+	/* Get file size */
+	if (fstat(fileno(fp), &st) == 0)
+		imgsz = (off_t)st.st_size;
+
+	/* Seek to offset */
+	if (dwOffset && fseeko(fp, (off_t)dwOffset, SEEK_SET) != 0)
+	{
+		fprintf(stderr, "Cannot seek to offset %llu: %s\n", (unsigned long long)dwOffset, strerror(errno));
+		fclose(fp);
+		return false;
+	}
+	offset = (off_t)dwOffset;
+
+	size_t n;
+	while ((n = fread(buf, 1, sizeof(buf), fp)) > 0)
+	{
+		if ((offset % (100 * BLOCK_SIZE)) == 0 && imgsz > 0)
+			printf ("\r%s %llu/%llu (%d%%)...", pszAction, (unsigned long long)offset, (unsigned long long)imgsz,
+				(int)(((double)offset / (double)imgsz) * 100));
+
+		/* Check for VOB magic using safe unaligned read */
+		if (read_u32(buf) == VOB_MAGIC && n >= 8)
+		{
+			pszAction = "Dumping";
+			vob = B2N_32(read_u32(&buf[4]));
+			if (vob > lastvob + dwThresh || vob < lastvob || lastvob == 0)
 			{
-				if (fpout) CloseHandle(fpout);
-				snprintf(outfile, sizeof(outfile), "%s\\%08d.mpg", pszDstDir, fno);
-				printf ("\rNew video stream found at offset %X%08X ", offset.HighPart, offset.LowPart);
-				while ((fpout=CreateFile(outfile, GENERIC_WRITE, FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, CREATE_NEW, 0, NULL)) == INVALID_HANDLE_VALUE)
+				if (fpout) fclose(fpout);
+				snprintf(outfile, sizeof(outfile), "%s/%08d.mpg", pszDstDir, fno);
+				printf ("\rNew video stream found at offset %08llx ", (unsigned long long)offset);
+				while ((fpout = fopen(outfile, "wb")) != NULL)
 				{
-					if (GetLastError() != ERROR_FILE_EXISTS)
-					{
-						fprintf(stderr, "Cannot write to destination file %s: ", outfile);
-						ShowError();
-						CloseHandle(fp);
-						return FALSE;
-					}
-					snprintf(outfile, sizeof(outfile), "%s\\%08d.mpg", pszDstDir, ++fno);
+					/* File opened successfully (new file) */
+					break;
+				}
+				/* If file already exists, try next number */
+				while (fpout == NULL && errno == EEXIST)
+				{
+					snprintf(outfile, sizeof(outfile), "%s/%08d.mpg", pszDstDir, ++fno);
+					fpout = fopen(outfile, "wb");
+				}
+				if (!fpout)
+				{
+					fprintf(stderr, "Cannot write to destination file %s: %s\n", outfile, strerror(errno));
+					fclose(fp);
+					return false;
 				}
 				printf ("-> %08d.mpg\n", fno);
 				fno++;
 			}
-			if (!WriteFile(fpout,buf,read,&read,NULL))
+			if (fwrite(buf, 1, n, fpout) != n)
 			{
-				fprintf(stderr, "Cannot append to destination file %s: ", outfile);
-				ShowError();
-				CloseHandle(fpout);
-				CloseHandle(fp);
-				return FALSE;
+				fprintf(stderr, "Cannot append to destination file %s: %s\n", outfile, strerror(errno));
+				if (fpout) fclose(fpout);
+				fclose(fp);
+				return false;
 			}
-			lastvob=vob;
-		} else pszAction="Scanning";
-		offset.QuadPart += read;
+			lastvob = vob;
+		}
+		else
+			pszAction = "Scanning";
+		offset += (off_t)n;
 	}
-	printf ("\r%s %X%08X/%X%08X (100%%)...", pszAction, offset.HighPart, offset.LowPart);
-	if (fpout) CloseHandle(fpout);
-	CloseHandle(fp);
+	printf ("\r%s %llu/%llu (100%%)...", pszAction, (unsigned long long)offset, (unsigned long long)imgsz);
+	if (fpout) fclose(fpout);
+	fclose(fp);
 	printf ("Done.\n");
-	return TRUE;
+	return true;
 }
 
 //---------------------------------------------------------------------------
@@ -243,80 +285,107 @@ BOOL extract(char *pszSrc, char *pszDstDir, DWORD dwOffset, DWORD fno, DWORD dwT
  * Returns:
  *	TRUE on success, FALSE on failure
  */
-BOOL merge(char *pszDstDir, DWORD dwStep)
+bool merge(char *pszDstDir, DWORD dwStep)
 {
-	WIN32_FIND_DATA find;
-	HANDLE hFind, hFile;
-	HANDLE hFind2, hFile2;
-	WIN32_FIND_DATA find2;
-	LARGE_INTEGER imgsz, offset;
-	char szPath[MAX_PATH], *pFile, buf[32768];
-	DWORD vob, vob2, read;
-	BOOL bRestart;
+	DIR *dir = NULL;
+	struct dirent *ent = NULL, *ent2 = NULL;
+	char szPath[4096], buf[32768];
+	uint32_t vob, vob2;
+	bool bRestart;
+
+	dir = opendir(pszDstDir);
+	if (!dir)
+	{
+		fprintf(stderr, "Cannot parse directory %s: %s\n", pszDstDir, strerror(errno));
+		return false;
+	}
 
 	do
 	{
-		pFile=szPath+sprintf(szPath, "%s\\*.*", pszDstDir)-3;
-		if ((hFind=FindFirstFile(szPath, &find)) == INVALID_HANDLE_VALUE)
+		bRestart = false;
+		rewinddir(dir);
+		while ((ent = readdir(dir)) != NULL)
 		{
-			fprintf(stderr, "Cannot parse directory %s: ", pszDstDir);
-			ShowError();
-			return FALSE;
-		}
-		bRestart=FALSE;
-		do
-		{
-			sprintf(pFile, find.cFileName);
-			if ((hFile=CreateFile(szPath, GENERIC_READ|GENERIC_WRITE, FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, 
-				OPEN_EXISTING, 0, NULL)) != INVALID_HANDLE_VALUE)
+			if (ent->d_name[0] == '.')
+				continue;
+			snprintf(szPath, sizeof(szPath), "%s/%s", pszDstDir, ent->d_name);
+
+			FILE *hFile = fopen(szPath, "r+b");
+			if (!hFile)
+				continue;
+
+			/* Read SCR from near end of file (-0x800+4 from end) */
+			struct stat fst;
+			if (fstat(fileno(hFile), &fst) == 0 && fst.st_size > 0x800)
 			{
-				SetFilePointer(hFile, -0x800+4, NULL, FILE_END);
-				vob=ReadFile(hFile,&vob,sizeof(vob),&read,NULL)?B2N_32(vob):0;
-				sprintf(pFile, "*.*");
-				if ((hFind2=FindFirstFile(szPath, &find2)) != INVALID_HANDLE_VALUE)
-				{
-					do
-					{
-						sprintf(pFile, find2.cFileName);
-						printf ("\rMatching %s/%s...", find.cFileName, find2.cFileName);
-						if ((hFile2=CreateFile(szPath, GENERIC_READ, FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, 
-							OPEN_EXISTING, 0, NULL)) != INVALID_HANDLE_VALUE)
-						{
-							SetFilePointer(hFile2, 4, NULL, FILE_BEGIN);
-							vob2=ReadFile(hFile2,&vob2,sizeof(vob2),&read,NULL)?B2N_32(vob2):0;
-							if (vob2>=vob+4 && vob2<=vob+dwStep)
-							{
-								bRestart = TRUE;
-								SetFilePointer(hFile, 0, NULL, FILE_END);
-								SetFilePointer(hFile2, 0, NULL, FILE_BEGIN);
-								imgsz.LowPart=GetFileSize(hFile2,&imgsz.HighPart);
-								offset.QuadPart = 0;
-								while(ReadFile(hFile2,buf,sizeof(buf),&read,NULL) && read)
-								{
-									offset.QuadPart += read;
-									if (offset.QuadPart%100==0) 
-										printf ("\rAppending %s to %s...%d%%", find2.cFileName, find.cFileName, 
-										(int)(((double)offset.QuadPart/(double)imgsz.QuadPart)*100));
-									WriteFile(hFile, buf, read, &read, NULL);
-								}
-								printf ("\rAppending %s to %s...Done.\n", find2.cFileName, find.cFileName);
-							}
-							CloseHandle(hFile2);
-							if (bRestart) DeleteFile(szPath);
-						}
-					}
-					while (!bRestart && FindNextFile(hFind2, &find2));
-					FindClose(hFind2);
-				}
-				CloseHandle(hFile);
+				fseeko(hFile, (off_t)fst.st_size - 0x800 + 4, SEEK_SET);
+				vob = 0;
+				fread(&vob, sizeof(vob), 1, hFile);
+				vob = B2N_32(vob);
 			}
+			else
+			{
+				fclose(hFile);
+				continue;
+			}
+
+			/* Inner loop: find a file to append */
+			rewinddir(dir);
+			while ((ent2 = readdir(dir)) != NULL)
+			{
+				if (ent2->d_name[0] == '.' || strcmp(ent2->d_name, ent->d_name) == 0)
+					continue;
+				snprintf(szPath, sizeof(szPath), "%s/%s", pszDstDir, ent2->d_name);
+				printf ("\rMatching %s/%s...", ent->d_name, ent2->d_name);
+
+				FILE *hFile2 = fopen(szPath, "rb");
+				if (!hFile2)
+					continue;
+
+				fseeko(hFile2, 4, SEEK_SET);
+				vob2 = 0;
+				fread(&vob2, sizeof(vob2), 1, hFile2);
+				vob2 = B2N_32(vob2);
+
+				if (vob2 >= vob + 4 && vob2 <= vob + dwStep)
+				{
+					bRestart = true;
+					fseeko(hFile, 0, SEEK_END);
+					fseeko(hFile2, 0, SEEK_SET);
+
+					struct stat fst2;
+					off_t imgsz = 0, offset = 0;
+					fstat(fileno(hFile2), &fst2);
+					imgsz = (off_t)fst2.st_size;
+
+					size_t n2;
+					while ((n2 = fread(buf, 1, sizeof(buf), hFile2)) > 0)
+					{
+						offset += (off_t)n2;
+						if ((offset % (100 * (off_t)sizeof(buf))) == 0 && imgsz > 0)
+							printf ("\rAppending %s to %s...%d%%", ent2->d_name, ent->d_name,
+								(int)(((double)offset / (double)imgsz) * 100));
+						fwrite(buf, 1, n2, hFile);
+					}
+					printf ("\rAppending %s to %s...Done.\n", ent2->d_name, ent->d_name);
+				}
+				fclose(hFile2);
+				if (bRestart)
+				{
+					snprintf(szPath, sizeof(szPath), "%s/%s", pszDstDir, ent2->d_name);
+					unlink(szPath);
+					break;
+				}
+			}
+			fclose(hFile);
+			if (bRestart)
+				break;
 		}
-		while (!bRestart && FindNextFile(hFind, &find));
-		FindClose(hFind);
 	}
 	while (bRestart);
+	closedir(dir);
 	printf ("No more matches found. -> Done\n");
-	return TRUE;
+	return true;
 }
 
 //---------------------------------------------------------------------------
@@ -357,14 +426,10 @@ BOOL merge(char *pszDstDir, DWORD dwStep)
 #define MODE_FLAG_DUB	128	/* Use "Dubbing" mode, skip deleted chunks and 
 							 * merge chunks like edited on recorder. No PTS
 							 * updating yet, use with care! */
-BOOL dir(char *pszSrc, char *pszDstDir, DWORD dwStart, DWORD dwThresh, DWORD dwMode)
+bool dir(char *pszSrc, char *pszDstDir, DWORD dwStart, DWORD dwThresh, DWORD dwMode)
 {
-	HANDLE fp, fpOut;
-	HMODULE hShell;
-	LARGE_INTEGER imgsz, offset;
-	DWORD read;
-	WCHAR wszDstDir[MAX_PATH];
-	fpPathCleanupSpec _PathCleanupSpec = NULL;
+	FILE *fp = NULL, *fpOut = NULL;
+	off_t imgsz = 0, offset = 0;
 	int i, kk, kklen, KCurrentProgramNumber;
 	FNTENTRY fntentry[FNT_ENTRIES], *pfntentry;
 	INODEINDEX InodeIndexTable[1000];
@@ -372,54 +437,46 @@ BOOL dir(char *pszSrc, char *pszDstDir, DWORD dwStart, DWORD dwThresh, DWORD dwM
 
 	if (pszDstDir)
 	{
-		HANDLE hAccessToken;
-		LUID luidPrivilege;
-
-		if (access(pszDstDir, 2))
+		struct stat dstst;
+		if (stat(pszDstDir, &dstst) != 0 || !S_ISDIR(dstst.st_mode))
 		{
-			fprintf(stderr, "Cannot write to destination dir %s: ", pszDstDir, strerror(errno));
-			return FALSE;
-		}
-		MultiByteToWideChar(CP_ACP,0,pszDstDir,-1,wszDstDir,MAX_PATH);
-		if (OpenProcessToken (GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hAccessToken))
-		{
-			if (LookupPrivilegeValue (NULL, SE_BACKUP_NAME, &luidPrivilege)) 
-			{
-				TOKEN_PRIVILEGES tpPrivileges;
-				tpPrivileges.PrivilegeCount = 1;
-				tpPrivileges.Privileges[0].Luid = luidPrivilege;
-				tpPrivileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-				AdjustTokenPrivileges (hAccessToken, FALSE, &tpPrivileges, 
-									   0, NULL, NULL);
-			}
+			fprintf(stderr, "Cannot write to destination dir %s: %s\n", pszDstDir, strerror(errno));
+			return false;
 		}
 	}
-	if ((fp=CreateFile(pszSrc, GENERIC_READ, FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, 
-		OPEN_EXISTING, 0, NULL)) == INVALID_HANDLE_VALUE)
+
+	fp = fopen(pszSrc, "rb");
+	if (!fp)
 	{
-		fprintf(stderr, "Cannot open source file %s: ", pszSrc);
-		ShowError();
-		return FALSE;
+		fprintf(stderr, "Cannot open source file %s: %s\n", pszSrc, strerror(errno));
+		return false;
 	}
 
-	/* Function is only available starting with Windows XP, so we must not depend
-	 * on it to be compatible with Win9x/NT
-	 */
-	if (hShell=LoadLibrary("shell32.dll"))
-		_PathCleanupSpec=(fpPathCleanupSpec)GetProcAddress(hShell, "PathCleanupSpec");
-	
-	SetFilePointer(fp,FNT_OFFSET,NULL,FILE_BEGIN);
-	if (!ReadFile(fp,&fntaddr,sizeof(fntaddr),&read,NULL) || !read)
+	/* Read FNT address */
+	if (!rd_at(fp, (off_t)FNT_OFFSET, &fntaddr, sizeof(fntaddr)))
 	{
 		fprintf (stderr, "Cannot read FNT address @%X\n", FNT_OFFSET);
-		ShowError();
-		return FALSE;
+		fclose(fp);
+		return false;
 	}
-	offset.QuadPart = fntaddr.block?B2N_32(fntaddr.block):0x4008;
-	offset.QuadPart *= BLOCK_SIZE;
-	if (dwThresh) imgsz.QuadPart =dwThresh;
-	else imgsz.LowPart=GetFileSize(fp,&imgsz.HighPart);
-	SetFilePointer(fp,offset.LowPart, &offset.HighPart,FILE_BEGIN);
+	offset = (off_t)(fntaddr.block ? B2N_32(fntaddr.block) : 0x4008);
+	offset *= (off_t)BLOCK_SIZE;
+
+	/* Get image size */
+	{
+		struct stat st;
+		if (dwThresh)
+			imgsz = (off_t)dwThresh;
+		else if (fstat(fileno(fp), &st) == 0)
+			imgsz = (off_t)st.st_size;
+	}
+
+	if (fseeko(fp, offset, SEEK_SET) != 0)
+	{
+		fprintf(stderr, "Cannot seek to FNT @%llx: %s\n", (unsigned long long)offset, strerror(errno));
+		fclose(fp);
+		return false;
+	}
 
 	if (dwMode & MODE_MASK)
 	{
@@ -428,56 +485,52 @@ BOOL dir(char *pszSrc, char *pszDstDir, DWORD dwStart, DWORD dwThresh, DWORD dwM
 		FOTENTRY fotentry[FOT_ENTRIES], *pfotentry;
 		int j, k, pfx, kpfx, fatoffset, fotoffset, ftoffs, files;
 
-		/* Accurately parse directory structure and extract videos based on
-		 * filesystem information
-		 */
-
 		/* Read a sector (file name table directory) */
-		if (!ReadFile(fp,&fntdir,sizeof(fntdir),&read,NULL) || !read)
+		if (fread(&fntdir, 1, sizeof(fntdir), fp) != sizeof(fntdir))
 		{
-			fprintf (stderr, "Cannot read FNT Directory info @%X%08X: ", offset.HighPart, offset.LowPart);
-			ShowError();
-			return FALSE;
+			fprintf (stderr, "Cannot read FNT Directory info @%08llx: %s\n", (unsigned long long)offset, strerror(errno));
+			fclose(fp);
+			return false;
 		}
 
 		/* Read INODE Index table, if needed */
-		if ((dwMode & MODE_FLAG_DUB) && (!ReadFile(fp,&InodeIndexTable,sizeof(InodeIndexTable),&read,NULL) || !read))
+		if ((dwMode & MODE_FLAG_DUB) &&
+			fread(&InodeIndexTable, 1, sizeof(InodeIndexTable), fp) != sizeof(InodeIndexTable))
 		{
-			fprintf (stderr, "Cannot read Inode index table: ");
-			ShowError();
-			return FALSE;
+			fprintf (stderr, "Cannot read Inode index table: %s\n", strerror(errno));
+			fclose(fp);
+			return false;
 		}
 
-		/* Go to FATENTRY list (forward 4 sectors) */
-		offset.QuadPart += FAT_OFFSET;
-		if (!SetFilePointer(fp,offset.LowPart, &offset.HighPart,FILE_BEGIN) ||
-			!ReadFile(fp,&fatdir,sizeof(fatdir),&read,NULL) || !read)
+		/* Go to FATENTRY list */
+		offset += (off_t)FAT_OFFSET;
+		if (fseeko(fp, offset, SEEK_SET) != 0 ||
+			fread(&fatdir, 1, sizeof(fatdir), fp) != sizeof(fatdir))
 		{
-			fprintf (stderr, "Cannot read FATENTRY list @%X%08X: ", offset.HighPart, offset.LowPart);
-			ShowError();
-			return FALSE;
+			fprintf (stderr, "Cannot read FATENTRY list @%08llx: %s\n", (unsigned long long)offset, strerror(errno));
+			fclose(fp);
+			return false;
 		}
 
 		/* Now find block number of file order table */
-		offset.QuadPart += (FOT_OFFSET)-(FAT_OFFSET);
-		if (!SetFilePointer(fp,offset.LowPart, &offset.HighPart,FILE_BEGIN) ||
-			!ReadFile(fp,&fotdir,sizeof(fotdir),&read,NULL) || !read)
+		offset += (off_t)(FOT_OFFSET - FAT_OFFSET);
+		if (fseeko(fp, offset, SEEK_SET) != 0 ||
+			fread(&fotdir, 1, sizeof(fotdir), fp) != sizeof(fotdir))
 		{
-			fprintf (stderr, "Cannot read File order table directory @%X%08X: ", offset.HighPart, offset.LowPart);
-			ShowError();
-			return FALSE;
+			fprintf (stderr, "Cannot read File order table directory @%08llx: %s\n", (unsigned long long)offset, strerror(errno));
+			fclose(fp);
+			return false;
 		}
 
-		kklen = (dwMode & MODE_FLAG_DUB)?sizeof(InodeIndexTable)/sizeof(InodeIndexTable[0]):1;
+		kklen = (dwMode & MODE_FLAG_DUB) ? (int)(sizeof(InodeIndexTable) / sizeof(InodeIndexTable[0])) : 1;
 
-		for (kk=0; kk<kklen; kk++)
+		for (kk = 0; kk < kklen; kk++)
 		{
-			/* We possibly reached end of IndexTable */ 
-			if ((dwMode & MODE_FLAG_DUB) && !InodeIndexTable[kk]) break;
+			if ((dwMode & MODE_FLAG_DUB) && !InodeIndexTable[kk])
+				break;
 
-			/* Now iterate over file name directory (program names) */
 			KCurrentProgramNumber = 0;
-			for (i=0, pfx=0; i<FNTDIR_ENTRIES; i++)
+			for (i = 0, pfx = 0; i < (int)FNTDIR_ENTRIES; i++)
 			{
 				if (dwMode & MODE_FLAG_DUB)
 				{
@@ -486,104 +539,109 @@ BOOL dir(char *pszSrc, char *pszDstDir, DWORD dwStart, DWORD dwThresh, DWORD dwM
 						KCurrentProgramNumber += 8;
 						continue;
 					}
-					kpfx = kk+1;
+					kpfx = kk + 1;
 				}
 				else
 				{
-					if (!fntdir[i].block) break;
+					if (!fntdir[i].block)
+						break;
 					kpfx = pfx;
 				}
-				offset.QuadPart=B2N_32(fntdir[i].block);
-				offset.QuadPart *= BLOCK_SIZE;
-				if (SetFilePointer(fp,offset.LowPart, &offset.HighPart,FILE_BEGIN) &&
-					ReadFile(fp,&fntentry,sizeof(fntentry),&read,NULL) && read)
+				offset = (off_t)B2N_32(fntdir[i].block);
+				offset *= (off_t)BLOCK_SIZE;
+				if (fseeko(fp, offset, SEEK_SET) == 0 &&
+					fread(&fntentry, 1, sizeof(fntentry), fp) == sizeof(fntentry))
 				{
-					/* Iterate over programs */
-					for (j=0; j<FNT_ENTRIES; j++, pfx++)
+ 				for (j = 0; j < (int)FNT_ENTRIES; j++, pfx++)
 					{
-						if (!fntentry[j].files && !(dwMode & MODE_FLAG_DUB)) break;
-						if ((DWORD)pfx<dwStart) continue;
+						if (!fntentry[j].files && !(dwMode & MODE_FLAG_DUB))
+							break;
+						if ((DWORD)pfx < dwStart)
+							continue;
 						KCurrentProgramNumber++;
-						if (!(dwMode & MODE_FLAG_DUB) || KCurrentProgramNumber == B2N_16(InodeIndexTable[kk]))
+						if (!(dwMode & MODE_FLAG_DUB) ||
+							KCurrentProgramNumber == (int)B2N_16(InodeIndexTable[kk]))
 						{
 							pfntentry = &fntentry[j];
 #ifndef FAT_TS
-							// Assuming that on models with TS in FAT, there is only 1 file...
-							printFNTEntry(pszDstDir, wszDstDir, _PathCleanupSpec, kpfx, pfntentry, &pfntentry->ts);
+							printFNTEntry(pszDstDir, kpfx, pfntentry, &pfntentry->ts);
 #endif
 							files = B2N_16(pfntentry->files);
-							if (files>1) printf ("%d files.\n", files);
+							if (files > 1)
+								printf ("%d files.\n", files);
 
-							/* Iterate over files the program consists of */
 							fotoffset = B2N_16(pfntentry->fotoffset);
-							for (k=0; k<files && fotoffset; k++)
+							for (k = 0; k < files && fotoffset; k++)
 							{
 								fotoffset--;
-								if ((ftoffs = fotoffset/FOT_ENTRIES)< FOTDIR_ENTRIES &&
+								if ((ftoffs = fotoffset / FOT_ENTRIES) < FOTDIR_ENTRIES &&
 									fotdir[ftoffs].block)
 								{
-									offset.QuadPart = B2N_32(fotdir[ftoffs].block);
-									offset.QuadPart *= BLOCK_SIZE;
-									if (SetFilePointer(fp,offset.LowPart, &offset.HighPart,FILE_BEGIN) &&
-										ReadFile(fp,&fotentry,sizeof(fotentry),&read,NULL) && read)
+									offset = (off_t)B2N_32(fotdir[ftoffs].block);
+									offset *= (off_t)BLOCK_SIZE;
+									if (fseeko(fp, offset, SEEK_SET) == 0 &&
+										fread(&fotentry, 1, sizeof(fotentry), fp) == sizeof(fotentry))
 									{
-										pfotentry = &fotentry[fotoffset%FOT_ENTRIES];
-										fatoffset = B2N_16(pfotentry->fatoffset)-1;
-										if ((ftoffs = fatoffset/FAT_ENTRIES)< FATDIR_ENTRIES &&
+										pfotentry = &fotentry[fotoffset % FOT_ENTRIES];
+										fatoffset = B2N_16(pfotentry->fatoffset) - 1;
+										if ((ftoffs = fatoffset / FAT_ENTRIES) < FATDIR_ENTRIES &&
 											fatdir[ftoffs].block)
 										{
-											/* Seek to FAT entry for given file */
-											offset.QuadPart=B2N_32(fatdir[ftoffs].block);
-											offset.QuadPart *= BLOCK_SIZE;
-											if (SetFilePointer(fp,offset.LowPart, &offset.HighPart,FILE_BEGIN) &&
-												ReadFile(fp,&fatentry,sizeof(fatentry),&read,NULL) && read)
+											offset = (off_t)B2N_32(fatdir[ftoffs].block);
+											offset *= (off_t)BLOCK_SIZE;
+											if (fseeko(fp, offset, SEEK_SET) == 0 &&
+												fread(&fatentry, 1, sizeof(fatentry), fp) == sizeof(fatentry))
 											{
-												pfatentry = &fatentry[fatoffset%FAT_ENTRIES];
+												pfatentry = &fatentry[fatoffset % FAT_ENTRIES];
 #ifdef FAT_TS
-												printFNTEntry(pszDstDir, wszDstDir, _PathCleanupSpec, kpfx, pfntentry, &pfatentry->ts);
+												printFNTEntry(pszDstDir, kpfx, pfntentry, &pfatentry->ts);
 #endif
-												offset.QuadPart = B2N_32(pfatentry->filesz);
-												printf ("Size: %d blocks ", offset.LowPart);
-												offset.QuadPart *= BLOCK_SIZE / 1024;
-												offset.QuadPart /= 1024;
-												printf ("(%d MB)\n", offset.LowPart);
+												uint32_t filesz = B2N_32(pfatentry->filesz);
+												printf ("Size: %u blocks ", filesz);
+												uint64_t mb = (uint64_t)filesz * BLOCK_SIZE / 1024 / 1024;
+												printf ("(%llu MB)\n", (unsigned long long)mb);
 
 												if (pszDstDir && (dwMode & MODE_MASK) == MODE_EXTRACT)
 												{
-													char outfile[MAX_PATH];
+													char outfile[4096];
 
-													/* The consists of multiple streams, make a ffmpeg concat script */
-													if (k>0)
+													/* Multi-stream: make a ffmpeg concat script */
+													if (k > 0)
 													{
-														snprintf(outfile, sizeof(outfile), "%s\\[%03d]%s\\concat.txt", pszDstDir, kpfx, pfntentry->progname);
-														if ((fpOut=CreateFile(outfile, GENERIC_WRITE, FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, 
-															(k==1?CREATE_ALWAYS:OPEN_EXISTING), 0, NULL)) != INVALID_HANDLE_VALUE)
+														snprintf(outfile, sizeof(outfile),
+															"%s/[%03d]%s/concat.txt", pszDstDir, kpfx, pfntentry->progname);
+														char line[256];
+														int len = snprintf(line, sizeof(line),
+															"file '%08d.mpg'\n", k);
+														fpOut = fopen(outfile, k == 1 ? "w" : "a");
+														if (fpOut)
 														{
-															WriteFile(fpOut,outfile,snprintf(outfile, sizeof(outfile), "file '%08d.mpg'\n", k),&read,NULL);
-															CloseHandle(fpOut);
+															fwrite(line, 1, (size_t)len, fpOut);
+															fclose(fpOut);
 														}
-														if (k==1)
+														if (k == 1)
 														{
-															snprintf(outfile, sizeof(outfile), "%s\\[%03d]%s\\concat.bat", pszDstDir, kpfx, pfntentry->progname);
-															if ((fpOut=CreateFile(outfile, GENERIC_WRITE, FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, 
-																CREATE_ALWAYS, 0, NULL)) != INVALID_HANDLE_VALUE)
+															snprintf(outfile, sizeof(outfile),
+																"%s/[%03d]%s/concat.sh", pszDstDir, kpfx, pfntentry->progname);
+															fpOut = fopen(outfile, "w");
+															if (fpOut)
 															{
-																WriteFile(fpOut,"ffmpeg -f concat -i concat.txt -c copy concat.vob", 49, &read, NULL);
-																CloseHandle(fpOut);
+																fprintf(fpOut,
+																	"#!/bin/sh\n"
+																	"ffmpeg -f concat -safe 0 -i concat.txt -c copy out.vob\n");
+																fclose(fpOut);
 															}
 														}
-
 													}
-													/* Seek to block list directory */
-													snprintf(outfile, sizeof(outfile), "%s\\[%03d]%s\\%08d.mpg", pszDstDir, kpfx, pfntentry->progname, k);
-													if ((fpOut=CreateFile(outfile, GENERIC_WRITE, FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, 
-														CREATE_ALWAYS, 0, NULL)) != INVALID_HANDLE_VALUE)
-													{
-														/* And finally dump the files associated with the program */
-														dumpFile(fp,fpOut,pfatentry);
-														CloseHandle(fpOut);
 
-														/* Ensure to set date/time correctly for the files afterwards */
+													snprintf(outfile, sizeof(outfile),
+														"%s/[%03d]%s/%08d.mpg", pszDstDir, kpfx, pfntentry->progname, k);
+													fpOut = fopen(outfile, "wb");
+													if (fpOut)
+													{
+														dumpFile(fp, fpOut, pfatentry);
+														fclose(fpOut);
+
 														dumpFNTEntry(pszDstDir, kpfx, pfntentry,
 #ifdef FAT_TS
 															&pfatentry->ts
@@ -594,41 +652,39 @@ BOOL dir(char *pszSrc, char *pszDstDir, DWORD dwStart, DWORD dwThresh, DWORD dwM
 													}
 													else
 													{
-														fprintf (stderr, "Cannot write to file %s: ", outfile);
-														ShowError();
+														fprintf (stderr, "Cannot write to file %s: %s\n", outfile, strerror(errno));
 													}
 												}
 											}
 											else
 											{
-												fprintf (stderr, "Cannot seek to fatentry #%d @ offset %X%08X: ", ftoffs, offset.HighPart, offset.LowPart);
-												ShowError();
+												fprintf (stderr, "Cannot seek to fatentry #%d @ offset %08llx: %s\n",
+													ftoffs, (unsigned long long)offset, strerror(errno));
 												break;
 											}
 										}
 										else
 											fprintf(stderr, "Invalid FAT entry (#%d)\n", ftoffs);
-										fotoffset=B2N_16(pfotentry->nextoffset);
+										fotoffset = B2N_16(pfotentry->nextoffset);
 									}
 									else
 									{
-										fprintf (stderr, "Cannot seek to file order table entry #%d @block %X: ", ftoffs, B2N_32(fotdir[ftoffs].block));
-										ShowError();
+										fprintf (stderr, "Cannot seek to file order table entry #%d @block %X: %s\n",
+											ftoffs, B2N_32(fotdir[ftoffs].block), strerror(errno));
 										break;
 									}
-
 								}
 								else
 									fprintf(stderr, "Offset %d in FOT doesn't point to a correct directory.\n", fotoffset);
 							}
-							if (dwMode & MODE_FLAG_DUB) break;
+							if (dwMode & MODE_FLAG_DUB)
+								break;
 						}
 					}
 				}
 				else
 				{
-					fprintf(stderr, "Cannot read FNTENTRY @%X%08X: ", offset.HighPart, offset.LowPart);
-					ShowError();
+					fprintf(stderr, "Cannot read FNTENTRY @%08llx: %s\n", (unsigned long long)offset, strerror(errno));
 				}
 			}
 		}
@@ -636,82 +692,78 @@ BOOL dir(char *pszSrc, char *pszDstDir, DWORD dwStart, DWORD dwThresh, DWORD dwM
 #ifdef FNTENTRY_MAGIC
 	else
 	{
-		/* Just do a dumb signature match scan to find directory structure.
-		 * i.e. to be used if Filesystem information is partly destroyed
-		 */
-		while(ReadFile(fp,&fntentry,sizeof(fntentry),&read,NULL) && read && offset.QuadPart<imgsz.QuadPart)
+		/* Heuristic scan for directory structure */
+		while (offset < imgsz)
 		{
-			if (offset.QuadPart%100==0) printf ("\r%s %X%08X/%X%08X (%0d%%)...", "Scanning", offset.HighPart, offset.LowPart, 
-				imgsz.HighPart, imgsz.LowPart, (int)(((double)offset.QuadPart/(double)imgsz.QuadPart)*100));
-			for (i=0; *((WORD*)&fntentry[i]) && fntentry[i].magic == FNTENTRY_MAGIC && i<FNT_ENTRIES; i++)
-				printFNTEntry(pszDstDir, wszDstDir, _PathCleanupSpec, i, &fntentry[i], &fntentry[i].ts);
-			offset.QuadPart += read;
+			if ((offset % (100 * BLOCK_SIZE)) == 0 && imgsz > 0)
+				printf ("\r%s %llu/%llu (%d%%)...", "Scanning", (unsigned long long)offset,
+					(unsigned long long)imgsz, (int)(((double)offset / (double)imgsz) * 100));
+
+			if (fseeko(fp, offset, SEEK_SET) == 0 &&
+				fread(&fntentry, 1, sizeof(fntentry), fp) == sizeof(fntentry))
+			{
+				for (i = 0; i < (int)FNT_ENTRIES; i++)
+				{
+					uint16_t first = read_u16(&fntentry[i]);
+					if (!first)
+						break;
+					if (fntentry[i].magic == FNTENTRY_MAGIC)
+						printFNTEntry(pszDstDir, i, &fntentry[i], &fntentry[i].ts);
+					else
+						break;
+				}
+			}
+			offset += (off_t)sizeof(fntentry);
 		}
 	}
 #endif
-	CloseHandle(fp);
+	fclose(fp);
 	printf ("Done.\n");
-	if (hShell) FreeLibrary(hShell);
- 	return TRUE;
+	return true;
 }
 
 /****************************************************************************
  *                                S T A T I C                               *
  ****************************************************************************/
 
-/* Prints the last error that occured to stderr */
-static void ShowError (void)
-{
-	char szMsg[1024];
-
-	FormatMessage (FORMAT_MESSAGE_FROM_SYSTEM, NULL, GetLastError(),
-		MAKELANGID (LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)szMsg, sizeof(szMsg), NULL);
-	fprintf (stderr, "%s\n", szMsg);
-}
-
-//---------------------------------------------------------------------------
-
 /* Cleans out invalid characters from program name so that a directory with
  * a valid name can be created
  *
  * Params:
- *	pszSpec		- Directory that contains all the movie chunks that will be
- *				  merged together.
- *	dwStep		- Threshold, chunks with SCR >4 && <dwThreshold are merged 
- *				  together.
+ *	pszSpec		- String to clean in place
  * Returns:
- *	TRUE on success, FALSE on failure
+ *	1 if any character was changed, 0 otherwise
  */
-static int myPathCleanupSpec(PWSTR pszSpec)
+static int myPathCleanupSpec(char *pszSpec)
 {
-	int iLen = wcslen(pszSpec), o, ret=0;
-	WCHAR *p;
+	int iLen = (int)strlen(pszSpec), o, ret = 0;
+	char *p;
 
-	while ((o=wcscspn(pszSpec,L"\\/:*?\"<>|"))<iLen)
+	while ((o = (int)strcspn(pszSpec, "/:*?\"<>|")) < iLen)
 	{
 		switch (pszSpec[o])
 		{
 		case '/':
-		case '\\':
-			pszSpec[o]='-'; break;
-		case '*':  pszSpec[o]='+'; break;
-		case ':':  pszSpec[o]=';'; break;
-		case '\"': pszSpec[o]='\''; break;
-		case '<':  pszSpec[o]='('; break;
-		case '>':  pszSpec[o]=')'; break;
-		case '|':  pszSpec[o]='I'; break;
-		default: pszSpec[o]='_'; break;
+			pszSpec[o] = '-'; break;
+		case '*':  pszSpec[o] = '+'; break;
+		case ':':  pszSpec[o] = ';'; break;
+		case '\"': pszSpec[o] = '\''; break;
+		case '<':  pszSpec[o] = '('; break;
+		case '>':  pszSpec[o] = ')'; break;
+		case '|':  pszSpec[o] = 'I'; break;
+		default:   pszSpec[o] = '_'; break;
 		}
-		ret=1;
+		ret = 1;
 	}
-	for (p=pszSpec+iLen-1; p>pszSpec && *p==' '; p--) *p=0;
+	for (p = pszSpec + iLen - 1; p > pszSpec && *p == ' '; p--)
+		*p = 0;
 	return ret;
 }
 
 //---------------------------------------------------------------------------
 
 /* Creates a directory with the correct timestamp from a file name table entry.
- * If the directory already exists, it just sets the timestamp of the 
+ * If the directory already exists, it just sets the timestamp of the
  * directory and all contained files.
  *
  * Params:
@@ -726,68 +778,62 @@ static int myPathCleanupSpec(PWSTR pszSpec)
  */
 static void dumpFNTEntry(char *pszDstDir, int idx, FNTENTRY *fnt, TIMESTAMP *ts)
 {
-	SYSTEMTIME st={0};
-	FILETIME ft;
-	char outfile[MAX_PATH], *pfn=outfile;
+	char outfile[4096];
+	struct tm tm_time;
+	time_t t;
 
-	st.wYear = B2N_16(ts->yy);
-	st.wMonth = ts->mm;
-	st.wDay = ts->dd;
-	st.wHour = ts->hh;
-	st.wMinute = ts->mi;
-	st.wSecond = ts->ss;
-	pfn+=snprintf(outfile, sizeof(outfile), "%s\\[%03d]%s", pszDstDir, idx, fnt->progname);
-	CreateDirectory(outfile, NULL);
-	if (SystemTimeToFileTime(&st, &ft))
+	snprintf(outfile, sizeof(outfile), "%s/[%03d]%s", pszDstDir, idx, fnt->progname);
+	mkdir(outfile, 0755);
+
+	/* Build a POSIX time_t from the timestamp */
+	memset(&tm_time, 0, sizeof(tm_time));
+	tm_time.tm_year = (int)B2N_16(ts->yy) - 1900;
+	tm_time.tm_mon  = (int)ts->mm - 1;
+	tm_time.tm_mday = (int)ts->dd;
+	tm_time.tm_hour = (int)ts->hh;
+	tm_time.tm_min  = (int)ts->mi;
+	tm_time.tm_sec  = (int)ts->ss;
+	tm_time.tm_isdst = -1;
+
+	t = mktime(&tm_time);
+	if (t != (time_t)-1)
 	{
-		HANDLE hDir;
-		WIN32_FIND_DATA find;
-		HANDLE hFind;
-		
-		LocalFileTimeToFileTime(&ft, &ft);
-		hDir = CreateFile(outfile, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-		if (hDir != INVALID_HANDLE_VALUE)
+		struct timespec times[2];
+		times[0].tv_sec = t;
+		times[0].tv_nsec = UTIME_NOW;
+		times[1].tv_sec = t;
+		times[1].tv_nsec = UTIME_NOW;
+
+		/* Set directory timestamp */
+		utimensat(AT_FDCWD, outfile, times, AT_SYMLINK_NOFOLLOW);
+
+		/* Set timestamp on all files in the directory */
+		DIR *d = opendir(outfile);
+		if (d)
 		{
-			SetFileTime(hDir, &ft, &ft, &ft);
-			CloseHandle(hDir);
-		}
-		strcpy (pfn++, "\\*.*");
-		if ((hFind=FindFirstFile(outfile, &find)) != INVALID_HANDLE_VALUE)
-		{
-			do
+			struct dirent *ent;
+			while ((ent = readdir(d)) != NULL)
 			{
-				strcpy(pfn, find.cFileName);
-				hDir = CreateFile(outfile, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-				if (hDir != INVALID_HANDLE_VALUE)
-				{
-					SetFileTime(hDir, &ft, &ft, &ft);
-					CloseHandle(hDir);
-				}
+				if (ent->d_name[0] == '.')
+					continue;
+				char filepath[4096];
+				snprintf(filepath, sizeof(filepath), "%s/%s", outfile, ent->d_name);
+				utimensat(AT_FDCWD, filepath, times, 0);
 			}
-			while (FindNextFile(hFind, &find));
-			FindClose(hFind);
+			closedir(d);
 		}
 	}
 }
 
 //---------------------------------------------------------------------------
 
-/* Prints the specified file name table entry to the console after converting
- * its charset to suit the console charset.
+/* Prints the specified file name table entry to the console.
  * If pszDstDir is given, also creates a directory with the correct timestamp
  * from the file name table entry in this directory (see dumpFNTentry).
  *
  * Params:
- *	pszDstDir	- Directory where the subdirectory will be created/updated
+ *	pszDstDir	- Directory where the subdirectory will be created/updated.
  *				  Can be NULL, if directory creation is not needed.
- *	wszDstDir	- Wide char version of pszDstDir (only used if pszDstDir
- *				  is not NULL). This is needed for PathCleanupSpec() call
- *				  that ensures that the filename is correct for the target
- *				  file system.
- *  _PathClean..- This is the function pointer to the PathCleanupSpec function
- *				  of shell32.dll. It's not available on all versions of 
- *				  Windows, therefore it needs to be dynamically loaded. If
- *				  it is not available, the pointer can also be NULL.
  *	idx			- Number of entry to be dumped. The directory name is prefixed
  *				  with this, as there can be multiple file names in the table
  *				  with the same name.
@@ -796,20 +842,16 @@ static void dumpFNTEntry(char *pszDstDir, int idx, FNTENTRY *fnt, TIMESTAMP *ts)
  * Returns:
  *	-
  */
-static void printFNTEntry(char *pszDstDir, WCHAR *wszDstDir, 
-						  fpPathCleanupSpec _PathCleanupSpec, int idx, FNTENTRY *fnt, TIMESTAMP *ts)
+static void printFNTEntry(char *pszDstDir, int idx, FNTENTRY *fnt, TIMESTAMP *ts)
 {
-	WCHAR wszTmp[MAX_PATH+1];
+	/* Ensure progname is NUL-terminated */
+	fnt->progname[63] = '\0';
 
-	MultiByteToWideChar(CP_ACP,0,fnt->progname,-1,wszTmp,sizeof(wszTmp)/sizeof(wszTmp[0]));
-	WideCharToMultiByte(CP_OEMCP,0,wszTmp,-1,fnt->progname,sizeof(fnt->progname),NULL,NULL);
-	printf ("\r#%03d [%02d.%02d.%04d %02d:%02d:%02d] %s\n", 
+	printf ("\r#%03d [%02d.%02d.%04d %02d:%02d:%02d] %s\n",
 		idx, ts->dd, ts->mm, B2N_16(ts->yy), ts->hh, ts->mi, ts->ss, fnt->progname);
-	if (pszDstDir) 
+	if (pszDstDir)
 	{
-		myPathCleanupSpec(wszTmp);
-		if (_PathCleanupSpec) _PathCleanupSpec(wszDstDir,wszTmp);
-		WideCharToMultiByte(CP_ACP,0,wszTmp,-1,fnt->progname,sizeof(fnt->progname),NULL,NULL);
+		myPathCleanupSpec(fnt->progname);
 		dumpFNTEntry(pszDstDir, idx, fnt, ts);
 	}
 }
@@ -824,87 +866,88 @@ static void printFNTEntry(char *pszDstDir, WCHAR *wszDstDir,
  *	fpout		- Handle to the destination file where data will be dumped to.
  *	fat			- File allocation table entry.
  * Returns:
- *	TRUE on success, FALSE on failure.
+ *	true on success, false on failure.
  */
-static BOOL dumpFile(HANDLE fp, HANDLE fpOut, FATENTRY *fat)
+static bool dumpFile(FILE *fp, FILE *fpOut, FATENTRY *fat)
 {
-	LARGE_INTEGER offset;
-	DWORD read, i, j, k, l, blocks;
+	off_t offset;
+	DWORD i, j, k, l, blocks;
 	WORD cnk_blocks;
 	BYTE buf[BLOCK_SIZE];
 	ADDRESS dir[BLOCKDIR_ENTRIES];
 	BLISTENTRY chunks[BLOCKDIR_ENTRIES];
-	BOOL bRet=FALSE;
+	bool bRet = false;
 
 	blocks = B2N_32(fat->filesz);
-	offset.QuadPart = B2N_32(fat->blockdir.block);
-	offset.QuadPart *= BLOCK_SIZE;
-	if (SetFilePointer(fp,offset.LowPart, &offset.HighPart,FILE_BEGIN) &&
-		ReadFile(fp,&dir,sizeof(dir),&read,NULL) && read)
+	offset = (off_t)B2N_32(fat->blockdir.block);
+	offset *= (off_t)BLOCK_SIZE;
+	if (fseeko(fp, offset, SEEK_SET) == 0 &&
+		fread(&dir, 1, sizeof(dir), fp) == sizeof(dir))
 	{
-		for (i=0, l=0; i<BLOCKDIR_ENTRIES; i++)
+		for (i = 0, l = 0; i < BLOCKDIR_ENTRIES; i++)
 		{
 			if (dir[i].block)
 			{
-				offset.QuadPart = B2N_32(dir[i].block);
-				offset.QuadPart *= BLOCK_SIZE;
-				if (SetFilePointer(fp,offset.LowPart, &offset.HighPart,FILE_BEGIN) &&
-					ReadFile(fp,&chunks,sizeof(chunks),&read,NULL) && read)
+				offset = (off_t)B2N_32(dir[i].block);
+				offset *= (off_t)BLOCK_SIZE;
+				if (fseeko(fp, offset, SEEK_SET) == 0 &&
+					fread(&chunks, 1, sizeof(chunks), fp) == sizeof(chunks))
 				{
-					for (j=0; j<BLIST_ENTRIES; j++)
+					for (j = 0; j < BLIST_ENTRIES; j++)
 					{
-						/*if (j%10==0) */printf ("\rDumping %d/%d blocks...%d%%", l, blocks, 
-							(int)(((double)l/(double)blocks)*100));
+						printf ("\rDumping %u/%u blocks...%d%%", l, blocks,
+							(int)(((double)l / (double)blocks) * 100));
 						if (chunks[j].block)
 						{
-							offset.QuadPart = B2N_32(chunks[j].block);
-							offset.QuadPart *= BLOCK_SIZE;
-							cnk_blocks = B2N_16(chunks[j].blocks)&0x7FFF;
-							if (SetFilePointer(fp,offset.LowPart, &offset.HighPart,FILE_BEGIN))
+							offset = (off_t)B2N_32(chunks[j].block);
+							offset *= (off_t)BLOCK_SIZE;
+							cnk_blocks = B2N_16(chunks[j].blocks) & 0x7FFF;
+							if (fseeko(fp, offset, SEEK_SET) == 0)
 							{
-								for (k=0; k<cnk_blocks; k++)
+								for (k = 0; k < cnk_blocks; k++)
 								{
-									if (ReadFile(fp,buf,sizeof(buf),&read,NULL) && read)
+									if (fread(buf, 1, sizeof(buf), fp) == sizeof(buf))
 									{
-										if (*((unsigned long*)buf)!=VOB_MAGIC)
-											fprintf (stderr, "\rWarning: Block #%d (@%X%08X) has no MPEG header!\n",
-												k, offset.HighPart, offset.LowPart);
-										if (!WriteFile(fpOut,buf,sizeof(buf),&read,NULL))
+										if (read_u32(buf) != VOB_MAGIC)
+											fprintf (stderr, "\rWarning: Block #%u (@%08llx) has no MPEG header!\n",
+												k, (unsigned long long)offset);
+										if (fwrite(buf, 1, sizeof(buf), fpOut) != sizeof(buf))
 										{
-											fprintf(stderr, "\r%s: Cannot write block #%d to output file: ", "Blocklist", k);
-											ShowError();
+											fprintf(stderr, "\r%s: Cannot write block #%u to output file: %s\n",
+												"Blocklist", k, strerror(errno));
 										}
 									}
 									else
 									{
-										fprintf(stderr, "\r%s: Cannot read block #%d: ", "Blocklist", k);
-										ShowError();
+										fprintf(stderr, "\r%s: Cannot read block #%u: %s\n",
+											"Blocklist", k, strerror(errno));
 									}
+									offset += (off_t)BLOCK_SIZE;
 								}
 							}
 							else
 							{
-								fprintf(stderr, "\r%s: Cannot seek to offset %X%08X: ", "Blocklist", offset.HighPart, offset.LowPart);
-								ShowError();
+								fprintf(stderr, "\r%s: Cannot seek to offset %08llx: %s\n",
+									"Blocklist", (unsigned long long)offset, strerror(errno));
 							}
-							l+=cnk_blocks;
+							l += cnk_blocks;
 						}
 					}
 				}
 				else
 				{
-					fprintf(stderr, "\r%s: Cannot seek to offset %X%08X: ", "Block directory", offset.HighPart, offset.LowPart);
-					ShowError();
+					fprintf(stderr, "\r%s: Cannot seek to offset %08llx: %s\n",
+						"Block directory", (unsigned long long)offset, strerror(errno));
 				}
 			}
 		}
-		bRet = l==blocks;
-		printf ("\rDumping %d/%d blocks...%s\n", l, blocks, l<blocks?"Incomplete":"Done");
+		bRet = (l == blocks);
+		printf ("\rDumping %u/%u blocks...%s\n", l, blocks, l < blocks ? "Incomplete" : "Done");
 	}
 	else
 	{
-		fprintf(stderr, "Cannot seek to offset %X%08X: ", offset.HighPart, offset.LowPart);
-		ShowError();
+		fprintf(stderr, "Cannot seek to offset %08llx: %s\n",
+			(unsigned long long)offset, strerror(errno));
 	}
 	return bRet;
 }
@@ -916,12 +959,13 @@ static BOOL dumpFile(HANDLE fp, HANDLE fpOut, FATENTRY *fat)
 int main(int argc, char **argv)
 {
 	int i;
-	DWORD dwXthresh=SCR_THRESH_X, dwMthresh=SCR_THRESH_M, dwOffset=0, dwStart=0, dwFlags=0;
+	DWORD dwXthresh = SCR_THRESH_X, dwMthresh = SCR_THRESH_M, dwStart = 0, dwFlags = 0;
+	uint64_t dwOffset = 0;
 
-	printf ("Simple Pioneer "RECORDER" recovery\n(c) by leecher@dose.0wnz.at 2014\n\n");
-	for (i=1; i<argc; i++)
+	printf ("Simple Pioneer " RECORDER " recovery\n(c) by leecher@dose.0wnz.at 2014\n\n");
+	for (i = 1; i < argc; i++)
 	{
-		if (argv[i][0]!='-')
+		if (argv[i][0] != '-')
 		{
 			fprintf(stderr, "You need to specify an action!\n\n");
 			break;
@@ -937,7 +981,7 @@ int main(int argc, char **argv)
 		case 's':
 		case 'o':
 		case 'c':
-			if (argc<=i+1)
+			if (argc <= i + 1)
 			{
 				fprintf(stderr, "%s needs a value!\n", argv[i]);
 				return EXIT_FAILURE;
@@ -955,7 +999,7 @@ int main(int argc, char **argv)
 				}
 				break;
 			case 'o':
-				dwOffset = strtoul(argv[++i], NULL, 0);
+				dwOffset = strtoull(argv[++i], NULL, 0);
 				break;
 			case 'c':
 				dwStart = strtoul(argv[++i], NULL, 0);
@@ -966,7 +1010,7 @@ int main(int argc, char **argv)
 		case 'x':
 		case 'd':
 		case 'L':
-			if (argc<=i+2)
+			if (argc <= i + 2)
 			{
 				fprintf(stderr, "%s needs source file and destination directory!\n", argv[i]);
 				return EXIT_FAILURE;
@@ -974,32 +1018,42 @@ int main(int argc, char **argv)
 			switch (argv[i][1])
 			{
 			case 'd':
-				return dir(argv[i+1], argv[i+2], dwStart, MAX_DIRSRCH, MODE_EXTRACT|dwFlags)?EXIT_SUCCESS:EXIT_FAILURE;
+				return dir(argv[i + 1], argv[i + 2], dwStart, MAX_DIRSRCH, MODE_EXTRACT | dwFlags)
+					? EXIT_SUCCESS : EXIT_FAILURE;
 			case 'L':
-				return dir(argv[i+1], argv[i+2], dwStart, MAX_DIRSRCH, MODE_HEUR|dwFlags)?EXIT_SUCCESS:EXIT_FAILURE;
+				return dir(argv[i + 1], argv[i + 2], dwStart, MAX_DIRSRCH, MODE_HEUR | dwFlags)
+					? EXIT_SUCCESS : EXIT_FAILURE;
 			}
-			if (!extract(argv[i+1], argv[i+2], dwOffset, dwStart, dwXthresh)) return EXIT_FAILURE;
-			if (argv[i++][1]!='p') return EXIT_SUCCESS;
+			if (!extract(argv[i + 1], argv[i + 2], dwOffset, dwStart, dwXthresh))
+				return EXIT_FAILURE;
+			if (argv[i][1] != 'p')
+				return EXIT_SUCCESS;
+			i++;
+			/* fallthrough to merge */
 		case 'm':
-			if (argc<=i+1)
+			if (argc <= i + 1)
 			{
 				fprintf(stderr, "%s needs destination directory!\n", argv[i]);
 				return EXIT_FAILURE;
 			}
-			return merge(argv[++i], dwMthresh)?EXIT_SUCCESS:EXIT_FAILURE;
+			return merge(argv[++i], dwMthresh) ? EXIT_SUCCESS : EXIT_FAILURE;
 		case 'l':
-			if (argc<=i+1)
+			if (argc <= i + 1)
 			{
 				fprintf(stderr, "%s needs source file!\n", argv[i]);
 				return EXIT_FAILURE;
 			}
-			if (!dir(argv[++i], NULL, dwStart, MAX_DIRSRCH, MODE_USEFS|dwFlags))
+			i++;
+			if (!dir(argv[i], NULL, dwStart, MAX_DIRSRCH, MODE_USEFS | dwFlags))
+			{
 #ifdef FNTENTRY_MAGIC
-				return dir(argv[++i], NULL, dwStart, MAX_DIRSRCH, MODE_HEUR|dwFlags)?EXIT_SUCCESS:EXIT_FAILURE;
+				return dir(argv[i], NULL, dwStart, MAX_DIRSRCH, MODE_HEUR | dwFlags)
+					? EXIT_SUCCESS : EXIT_FAILURE;
 #else
 				return EXIT_FAILURE;
 #endif
-			return TRUE;
+			}
+			return EXIT_SUCCESS;
 		default:
 			fprintf(stderr, "Unknown commandline option: %s\n\n", argv[i]);
 			break;
