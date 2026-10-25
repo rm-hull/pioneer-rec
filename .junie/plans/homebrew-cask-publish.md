@@ -45,7 +45,7 @@ Publish `pioneer-rec` to the Homebrew tap `rm-hull/homebrew-tap` so users can in
 #### 1. Release workflow (`.github/workflows/release.yml`)
 Triggers on `v*` tag pushes. Build matrix:
 - **macOS arm64**: `macos-latest` runner, native `make all`
-- **macOS amd64**: `macos-13` runner, native `make all`
+- **macOS amd64**: `macos-15-intel` runner, native `make all`
 - **Linux amd64**: `ubuntu-latest`, native `make all`
 - **Linux arm64**: `ubuntu-latest` with `qemu-user-static`, cross-compiled `make all`
 
@@ -64,7 +64,7 @@ A dependent job:
 graph LR
   A["v* tag push"] --> B["Build matrix"]
   B --> B1["macOS arm64 / macos-latest"]
-  B --> B2["macOS amd64 / macos-13"]
+  B --> B2["macOS amd64 / macos-15-intel"]
   B --> B3["Linux amd64 / ubuntu-latest"]
   B --> B4["Linux arm64 / ubuntu-latest + QEMU"]
   B1 --> C["Upload tar.gz to GitHub Release"]
@@ -89,7 +89,7 @@ Following `git-commit-summary.rb` structure:
 
 ### ✓ Step 1: Create release workflow with multi-platform build matrix
 Create `.github/workflows/release.yml` that triggers on `v*` tag pushes.
-- Define a build matrix: macOS arm64 (`macos-latest`), macOS amd64 (`macos-13`), Linux amd64 (`ubuntu-latest`), Linux arm64 (`ubuntu-latest` with QEMU cross-compilation).
+- Define a build matrix: macOS arm64 (`macos-latest`), macOS amd64 (`macos-15-intel`), Linux amd64 (`ubuntu-latest`), Linux arm64 (`ubuntu-latest` with QEMU cross-compilation).
 - Each job runs `make all` natively (or via QEMU for Linux arm64).
 - Package the 4 binaries (`pioneer_rec`, `pioneer_rec_520`, `pioneer_rec_545`, `pioneer_rec_550`) into a `tar.gz` archive.
 - Upload the `tar.gz` as a GitHub Release artifact.
@@ -102,10 +102,11 @@ Add a post-release job to the `release.yml` workflow.
 - Commit and push the cask to `rm-hull/homebrew-tap` using the `HOMEBREW_TAP_GITHUB_TOKEN` secret.
 - Include `postflight` block to remove `com.apple.quarantine` on macOS.
 
-###   Step 3: Create initial release and verify installation
+### * Step 3: Create initial release and verify installation
 Create the initial release so users can install via Homebrew.
-- Cut a `v1.0.0` tag (or appropriate version).
+- Cut a `v0.1.0` tag (already created).
 - Push the tag to trigger the release workflow.
+- Fix `macos-13` → `macos-15-intel` runner (deprecated, causing queue hang).
 - Verify that the GitHub Release is created with all artifacts.
 - Verify that `pioneer-rec.rb` is pushed to `rm-hull/homebrew-tap`.
 - Test: `brew install rm-hull/tap/pioneer-rec`
