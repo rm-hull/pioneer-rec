@@ -1,5 +1,8 @@
 # pioneer-rec
 
+> [!NOTE]
+> This Windows-to-POSIX port was performed entirely with [Junie CLI](https://jetbrains.com/junie).
+
 Recover recordings from failed Pioneer DVR and Sony HXD recorder hard drives.
 
 So there you are with your Pioneer DVR633H-S, DVR545H, DVR-550H, DVR-520H, or Sony HXD showing you an HDD Error and refusing to boot. This usually indicates that the hard drive in the recorder went bad. But don't panic — there may be hope!
