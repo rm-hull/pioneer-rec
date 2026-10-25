@@ -6,21 +6,21 @@ cask "pioneer-rec" do
   on_macos do
     on_arm do
       sha256 "DARWIN_ARM64_SHA_PLACEHOLDER"
-      url "https://github.com/rm-hull/pioneer-rec/releases/download/v#{version}/pioneer-rec-v#{version}_darwin_arm64.tar.gz"
+      url "https://github.com/rm-hull/pioneer-rec/releases/download/v#{version}/pioneer-rec-v#{version}-darwin_arm64.tar.gz"
     end
     on_intel do
       sha256 "DARWIN_AMD64_SHA_PLACEHOLDER"
-      url "https://github.com/rm-hull/pioneer-rec/releases/download/v#{version}/pioneer-rec-v#{version}_darwin_amd64.tar.gz"
+      url "https://github.com/rm-hull/pioneer-rec/releases/download/v#{version}/pioneer-rec-v#{version}-darwin_amd64.tar.gz"
     end
   end
   on_linux do
     on_arm do
       sha256 "LINUX_ARM64_SHA_PLACEHOLDER"
-      url "https://github.com/rm-hull/pioneer-rec/releases/download/v#{version}/pioneer-rec-v#{version}_linux_arm64.tar.gz"
+      url "https://github.com/rm-hull/pioneer-rec/releases/download/v#{version}/pioneer-rec-v#{version}-linux_arm64.tar.gz"
     end
     on_intel do
       sha256 "LINUX_AMD64_SHA_PLACEHOLDER"
-      url "https://github.com/rm-hull/pioneer-rec/releases/download/v#{version}/pioneer-rec-v#{version}_linux_amd64.tar.gz"
+      url "https://github.com/rm-hull/pioneer-rec/releases/download/v#{version}/pioneer-rec-v#{version}-linux_amd64.tar.gz"
     end
   end
 
@@ -37,12 +37,12 @@ cask "pioneer-rec" do
   binary "pioneer_rec_545"
   binary "pioneer_rec_550"
 
-  postflight do
-    if OS.mac?
-      system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/pioneer_rec"]
-      system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/pioneer_rec_520"]
-      system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/pioneer_rec_545"]
-      system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/pioneer_rec_550"]
+  postflight_steps do
+    on_macos do
+      run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{staged_path}}/pioneer_rec"]
+      run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{staged_path}}/pioneer_rec_520"]
+      run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{staged_path}}/pioneer_rec_545"]
+      run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{staged_path}}/pioneer_rec_550"]
     end
   end
 
