@@ -428,8 +428,12 @@ bool merge(char *pszDstDir, DWORD dwStep)
 							 * updating yet, use with care! */
 bool dir(char *pszSrc, char *pszDstDir, DWORD dwStart, DWORD dwThresh, DWORD dwMode)
 {
+	(void)dwThresh; /* only used when FNTENTRY_MAGIC is defined */
 	FILE *fp = NULL, *fpOut = NULL;
-	off_t imgsz = 0, offset = 0;
+	off_t offset = 0;
+#ifdef FNTENTRY_MAGIC
+	off_t imgsz = 0;
+#endif
 	int i, kk, kklen, KCurrentProgramNumber;
 	FNTENTRY fntentry[FNT_ENTRIES], *pfntentry;
 	INODEINDEX InodeIndexTable[1000];
@@ -462,7 +466,8 @@ bool dir(char *pszSrc, char *pszDstDir, DWORD dwStart, DWORD dwThresh, DWORD dwM
 	offset = (off_t)(fntaddr.block ? B2N_32(fntaddr.block) : 0x4008);
 	offset *= (off_t)BLOCK_SIZE;
 
-	/* Get image size */
+	/* Get image size (only needed for heuristic scan) */
+#ifdef FNTENTRY_MAGIC
 	{
 		struct stat st;
 		if (dwThresh)
@@ -470,6 +475,7 @@ bool dir(char *pszSrc, char *pszDstDir, DWORD dwStart, DWORD dwThresh, DWORD dwM
 		else if (fstat(fileno(fp), &st) == 0)
 			imgsz = (off_t)st.st_size;
 	}
+#endif
 
 	if (fseeko(fp, offset, SEEK_SET) != 0)
 	{
