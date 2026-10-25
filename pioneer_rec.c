@@ -320,7 +320,7 @@ bool merge(char *pszDstDir, DWORD dwStep)
 			{
 				fseeko(hFile, (off_t)fst.st_size - 0x800 + 4, SEEK_SET);
 				vob = 0;
-				fread(&vob, sizeof(vob), 1, hFile);
+				(void)fread(&vob, sizeof(vob), 1, hFile);
 				vob = B2N_32(vob);
 			}
 			else
@@ -344,7 +344,7 @@ bool merge(char *pszDstDir, DWORD dwStep)
 
 				fseeko(hFile2, 4, SEEK_SET);
 				vob2 = 0;
-				fread(&vob2, sizeof(vob2), 1, hFile2);
+				(void)fread(&vob2, sizeof(vob2), 1, hFile2);
 				vob2 = B2N_32(vob2);
 
 				if (vob2 >= vob + 4 && vob2 <= vob + dwStep)
@@ -576,11 +576,11 @@ bool dir(char *pszSrc, char *pszDstDir, DWORD dwStart, DWORD dwThresh, DWORD dwM
 							if (files > 1)
 								printf ("%d files.\n", files);
 
-							fotoffset = B2N_16(pfntentry->fotoffset);
+							fotoffset = (int)B2N_16(pfntentry->fotoffset);
 							for (k = 0; k < files && fotoffset; k++)
 							{
 								fotoffset--;
-								if ((ftoffs = fotoffset / FOT_ENTRIES) < FOTDIR_ENTRIES &&
+								if ((ftoffs = fotoffset / (int)FOT_ENTRIES) < (int)FOTDIR_ENTRIES &&
 									fotdir[ftoffs].block)
 								{
 									offset = (off_t)B2N_32(fotdir[ftoffs].block);
@@ -588,9 +588,9 @@ bool dir(char *pszSrc, char *pszDstDir, DWORD dwStart, DWORD dwThresh, DWORD dwM
 									if (fseeko(fp, offset, SEEK_SET) == 0 &&
 										fread(&fotentry, 1, sizeof(fotentry), fp) == sizeof(fotentry))
 									{
-										pfotentry = &fotentry[fotoffset % FOT_ENTRIES];
-										fatoffset = B2N_16(pfotentry->fatoffset) - 1;
-										if ((ftoffs = fatoffset / FAT_ENTRIES) < FATDIR_ENTRIES &&
+										pfotentry = &fotentry[fotoffset % (int)FOT_ENTRIES];
+										fatoffset = (int)B2N_16(pfotentry->fatoffset) - 1;
+										if ((ftoffs = fatoffset / (int)FAT_ENTRIES) < (int)FATDIR_ENTRIES &&
 											fatdir[ftoffs].block)
 										{
 											offset = (off_t)B2N_32(fatdir[ftoffs].block);
@@ -823,7 +823,7 @@ static void dumpFNTEntry(char *pszDstDir, int idx, FNTENTRY *fnt, TIMESTAMP *ts)
 				if (ent->d_name[0] == '.')
 					continue;
 				char filepath[4096];
-				snprintf(filepath, sizeof(filepath), "%s/%s", outfile, ent->d_name);
+				(void)snprintf(filepath, sizeof(filepath), "%s/%s", outfile, ent->d_name);
 				utimensat(AT_FDCWD, filepath, times, 0);
 			}
 			closedir(d);
@@ -1037,7 +1037,7 @@ int main(int argc, char **argv)
 			if (argv[i][1] != 'p')
 				return EXIT_SUCCESS;
 			i++;
-			/* fallthrough to merge */
+			__attribute__((fallthrough));
 		case 'm':
 			if (argc <= i + 1)
 			{
