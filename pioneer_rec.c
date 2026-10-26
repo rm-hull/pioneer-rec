@@ -636,6 +636,7 @@ bool dir(char *pszSrc, char *pszDstDir, DWORD dwStart, DWORD dwThresh, DWORD dwM
 																	"#!/bin/sh\n"
 																	"ffmpeg -f concat -safe 0 -i concat.txt -c copy out.vob\n");
 																fclose(fpOut);
+																chmod(outfile, 0755);
 															}
 														}
 													}
