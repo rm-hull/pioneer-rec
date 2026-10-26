@@ -634,7 +634,7 @@ bool dir(char *pszSrc, char *pszDstDir, DWORD dwStart, DWORD dwThresh, DWORD dwM
 															{
 																fprintf(fpOut,
 																	"#!/bin/sh\n"
-																	"ffmpeg -f concat -safe 0 -i concat.txt -c copy out.vob\n");
+																	"ffmpeg -f concat -safe 0 -i concat.txt -c:v libx264 -preset medium -crf 23 -c:a aac out.mp4\n");
 																fclose(fpOut);
 																chmod(outfile, 0755);
 															}

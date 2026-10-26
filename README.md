@@ -123,7 +123,7 @@ cd ./dump/[001]Recording Name/
 bash concat.sh
 ```
 
-This produces `out.vob` using ffmpeg.
+This uses ffmpeg to concatenate the chunks and transcode to H.264, producing `out.mp4`. The original MPEG-2 recordings are typically 3–6 GB per hour; the H.264 output is usually 500–1000 MB at visually identical quality.
 
 ## Original Windows Build
 
