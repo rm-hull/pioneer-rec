@@ -129,6 +129,16 @@ This uses ffmpeg to concatenate the chunks and transcode to H.264, producing `ou
 
 The original `.dsp` / `.dsw` Visual Studio 6 project files are preserved in the `archive` folder for reference. This project now targets macOS and Linux via the `Makefile`.
 
+## Post-processing
+
+The original files are MPEG2 VOB files - using H.264 compresses significantly without a perceptible drop in quality:
+
+```sh
+ffmpeg -i 00000000.mpg -c:v libx264 -preset medium -crf 23 -c:a aac out.mp4
+```
+
+H.265 would result in smaller files at the expense of longer conversion and reduced compatibility across older TVs, so the decision was taken to not go beyond H.264. 
+
 ## Links
 
 - Discussion: [Blog post](http://hardwarefetish.com/584-pioneer-dvr-recorder-harddisk-recovery)
