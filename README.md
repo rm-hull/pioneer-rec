@@ -1,7 +1,7 @@
 # pioneer-rec (linux edition) ![tux](./docs/tux-80px.png)
 
 > [!NOTE]
-> This Windows-to-POSIX port was performed entirely with [Junie CLI](https://jetbrains.com/junie).
+> This Windows-to-POSIX port was performed entirely with [Junie CLI](https://jetbrains.com/junie). The original code repo was forked and modified; changes only extend to making the code build on Linux & MacOS.
 
 Recover recordings from failed Pioneer DVR and Sony HXD recorder hard drives.
 
